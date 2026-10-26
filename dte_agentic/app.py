@@ -1,27 +1,9 @@
 """Stateless Massaciuccoli conversational baseline.
-
-Generation defaults match DigitalTwinLegacy: num_ctx=16384,
-num_predict=2500, temperature=0, top_p=1, seed=42; /api/generate.
-RAG defaults: top 8 Chroma neighbours, distance <= 0.6, exact-text
-deduplication, 1,200-character fixed chunks without overlap. The supplied
-Java code creates collections with the Chroma default squared-L2 metric;
-this script explicitly uses that metric. Existing Java collections may
-have different creation settings and must be checked separately.
-The Java correlation task overrides its cutoff to 0.5; this baseline has
-no task router and uses the shared default (overridable via RAG_MAX_DISTANCE).
-Raw CSV records remain indexed here; Java documentary RAG indexes PDFs.
-PDF text is extracted with pypdf, while Java uses PDFBox, so extraction
-and therefore chunk contents need not be byte-identical.
-Install fonttools alongside pypdf to support embedded CFF font decoding.
-With the D4Science Ollama-compatible bridge to Google Cloud active, set
+With the Ollama-compatible bridge to Google Cloud active, set
 LLM_MODEL=gemini-3.5-flash and OLLAMA_BASE_URL to the bridge endpoint.
 The Nomic embedding endpoint is configured separately: EMBEDDING_BASE_URL.
-Live-data routing uses the Java data-category cutoff 0.6 with the baseline's
-existing ten reference expressions; it is not the full Java category router.
-Gemini bridge maps num_predict, temperature, top_p and seed, but ignores
-num_ctx; the cloud model context capacity applies.
-If the existing container only pulls llama3.2:3b, pull llama3.2:latest as
-well or set LLM_MODEL=llama3.2:3b after checking that the weights match.
+Live-data routing uses data-category cutoff 0.6 with the baseline's
+existing ten reference expressions.
 """
 __import__('pysqlite3')
 import sys
