@@ -1,0 +1,15 @@
+####DOCKERIZE:
+docker build -t gianpaolocoro/langchain-llama3.2_3b-chroma-liveupd .
+
+####NEW version (slim):
+#connect to the docker:
+docker run --gpus all -p 5000:5000 -p 11434:11434 -v ollama_models:/root/.ollama -v chroma_db_data_3_2:/app/chroma_db -it --entrypoint /bin/bash gianpaolocoro/langchain-llama3.2_3b-chroma-liveupd
+
+#run the chatbot
+docker run --gpus all \
+  -p 5000:5000 \
+  -p 11434:11434 \
+  -v ollama_models:/root/.ollama \
+  -v chroma_db_data:/app/chroma_db \
+  gianpaolocoro/langchain-llama3.2_3b-chroma-liveupd
+  
