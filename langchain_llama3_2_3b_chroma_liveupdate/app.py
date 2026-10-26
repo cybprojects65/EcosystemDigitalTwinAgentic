@@ -10,6 +10,7 @@ import sys
 sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
 
 import hashlib
+import logging
 import os
 from pathlib import Path
 from io import StringIO
@@ -29,6 +30,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 import requests
 import pandas as pd
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 app = Flask(__name__)
 LLM_MODEL = os.getenv("LLM_MODEL", "llama3.2:3b")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
@@ -50,6 +52,7 @@ print(f"Corpus: {sum(p.suffix.lower() == '.pdf' for p in files)} PDFs, "
       f"{sum(p.suffix.lower() == '.csv' for p in files)} CSVs")
 fingerprint = hashlib.sha256(f"{CHUNK_SIZE}:{CHUNK_OVERLAP}:{EMBEDDING_MODEL}".encode())
 for path in files:
+    app.logger.info("Corpus file: %s", path.name)
     fingerprint.update(path.name.encode())
     with path.open("rb") as stream:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
@@ -85,9 +88,58 @@ def retrieve_documents(inputs):
     scores = cosine_similarity(query_vector, chunk_vectors)[0]
     selected = np.flatnonzero(scores >= DOCUMENT_SIMILARITY_THRESHOLD)
     selected = selected[np.argsort(-scores[selected], kind="stable")]
-    return [Document(page_content=indexed["documents"][i],
-                     metadata={**(indexed["metadatas"][i] or {}), "cosine_similarity": float(scores[i])})
-            for i in selected]
+    documents = [
+        Document(
+            page_content=indexed["documents"][i],
+            metadata={
+                **(indexed["metadatas"][i] or {}),
+                "cosine_similarity": float(scores[i]),
+            },
+        )
+        for i in selected
+    ]
+
+    pdf_count = sum(
+        str(doc.metadata.get("source", "")).lower().endswith(".pdf")
+        for doc in documents
+    )
+    app.logger.info(
+        "Retrieval: %d qualifying chunks (%d PDF chunks, %d other chunks); "
+        "cosine threshold >= %.2f",
+        len(documents), pdf_count, len(documents) - pdf_count,
+        DOCUMENT_SIMILARITY_THRESHOLD,
+    )
+    if not documents:
+        app.logger.warning(
+            "No chunks meet the retrieval threshold. No indexed PDF or CSV "
+            "passages will be supplied for this request."
+        )
+    elif not pdf_count:
+        app.logger.warning(
+            "No PDF passages retrieved for this request; qualifying chunks "
+            "come from other indexed sources."
+        )
+
+    for rank, doc in enumerate(documents, start=1):
+        source = str(doc.metadata.get("source", "unknown"))
+        page = doc.metadata.get("page")
+        # PyPDFLoader page indices are zero-based; display physical PDF pages
+        # starting at 1. These may differ from printed page numbers.
+        page_display = (
+            page + 1 if source.lower().endswith(".pdf")
+            and isinstance(page, int) else "N/A"
+        )
+        app.logger.info(
+            "Match %d | source=%s | PDF page=%s | cosine=%.4f | excerpt=%s",
+            rank, source, page_display,
+            doc.metadata["cosine_similarity"],
+            doc.page_content[:300].replace("\n", " ").replace("\r", " "),
+        )
+
+    # This list is passed to the document-combination chain as LLM context.
+    # Logs establish passage selection, not whether generation follows it.
+    return documents
+
 
 retriever = RunnableLambda(retrieve_documents)
 

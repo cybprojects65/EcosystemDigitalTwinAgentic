@@ -11,7 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     zstd \
     ca-certificates \
-    python3 \
+	python3 \
     python3-pip \
     python3-dev \
     build-essential \
@@ -38,9 +38,10 @@ RUN pip3 install --no-cache-dir \
     pysqlite3-binary \
     pandas \
     pypdf \
+    fonttools \
     scikit-learn \
     numpy
-    
+	
 COPY . .
 
 RUN chmod +x start.sh
