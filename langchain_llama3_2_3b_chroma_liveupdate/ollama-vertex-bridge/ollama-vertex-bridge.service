@@ -1,0 +1,17 @@
+[Unit]
+Description=Ollama-compatible bridge to Google Vertex AI
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=CHANGE_ME
+Group=CHANGE_ME
+WorkingDirectory=/opt/ollama-vertex-bridge
+EnvironmentFile=-/etc/default/ollama-vertex-bridge
+ExecStart=/usr/bin/python3 /opt/ollama-vertex-bridge/ollama_vertex_bridge.py --host 0.0.0.0 --port 11435
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
