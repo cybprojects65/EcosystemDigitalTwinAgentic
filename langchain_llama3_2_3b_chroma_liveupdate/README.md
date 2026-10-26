@@ -4,6 +4,10 @@ A domain-specific environmental chatbot for the Massaciuccoli Lake basin, Tuscan
 
 This project implements the **agentic baseline** in the study-specific sense of an LLM-led conversational architecture: the LLM interprets retrieved evidence and constructs an answer. It does not autonomously execute scientific tools or run the query-specific analytical modules of the reactive EcosystemDigitalTwin framework.
 
+## How to cite:
+
+Coro, G. and Bove, B. 2026. Building Conversational Digital Twins of Natural Ecosystems with Reactive Artificial Intelligence.
+
 ## Features
 
 - Scientific context from twelve PDF documents and an ecosystem CSV.
