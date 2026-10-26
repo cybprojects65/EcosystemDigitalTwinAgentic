@@ -1,5 +1,5 @@
 ####DOCKERIZE:
-docker build -t gianpaolocoro/langchain-llama3.2_3b-chroma-liveupd .
+docker build -t gianpaolocoro/dte_agentic .
 
 #run the chatbot
 docker run --gpus all \
@@ -7,5 +7,5 @@ docker run --gpus all \
   -p 11434:11434 \
   -v ollama_models:/root/.ollama \
   -v chroma_db_data:/app/chroma_db \
-  gianpaolocoro/langchain-llama3.2_3b-chroma-liveupd
+  gianpaolocoro/dte_agentic
   
