@@ -148,6 +148,47 @@ of Ollama context handling. The extra API call adds latency and requires countTo
 access for the deployed model. Gemini/provider reasoning and token accounting can
 also affect the amount of visible answer text within the output limit.
 
+### Input limits and rejection behaviour
+
+**4096 is the combined input-plus-reserved-output budget, not the input limit.**
+
+| Setting | Default | Meaning |
+| --- | ---: | --- |
+| Local total budget | 4096 tokens | Input plus reserved maximum output |
+| Reserved maximum output | 1536 tokens | Upper bound, not a target answer length |
+| Available input budget | 2560 tokens | 4096 minus 1536 |
+| Temperature | 0 | Fixed value forwarded to Vertex |
+
+The bridge counts the converted request with Vertex's tokenizer, including system
+instructions, supplied evidence, user messages, and any included conversation
+history or images. It does not measure input length by characters or words.
+
+- Input of 2560 tokens: accepted by the local budget check.
+- Input of 2561 tokens: rejected with HTTP 400 before generation.
+- Input of 4096 tokens: also rejected, because no room remains for the reserved output.
+
+The full output allowance is reserved even when an answer might end early.
+Oversized input is never automatically truncated, summarised, or reduced by
+removing RAG passages. The client must reduce the input and resubmit it. Other
+provider errors can still prevent a request that passes this budget check.
+
+Example error message:
+
+```text
+Local context budget exceeded: 2561 input tokens + 1536 reserved output tokens > 4096. Reduce the supplied context; no input was truncated.
+```
+
+If you instead want **4096 input tokens plus 1536 output tokens**, set the
+administrator environment variable `LOCAL_CONTEXT_WINDOW=5632` and restart the
+service. Changing only the client's `options.num_ctx` does not change the budget.
+
+Implementation: `Config.__init__()` sets the limits;
+`enforce_context_budget()` counts and checks the request; `handle_generation()`
+calls this check before requesting generation for both API endpoints. The policy
+does not resize Gemini's native context window. Output can still end at the
+configured generation limit; input rejection and output-length limiting are
+separate behaviours.
+
 After replacing an installed script and environment file, restart the service:
 
 ```bash
