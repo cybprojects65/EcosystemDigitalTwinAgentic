@@ -11,7 +11,7 @@ A dependency-free Python 3 service that accepts common Ollama HTTP API requests 
 - `GET /api/version`
 - `GET /healthz`
 
-Both generation endpoints support Ollama's `stream: true` NDJSON response and `stream: false` single-JSON response. The service maps `temperature`, `top_p`, `top_k`, `num_predict`, `seed`, and `stop` from Ollama `options` to Vertex generation settings.
+Both generation endpoints support Ollama's `stream: true` NDJSON response and `stream: false` single-JSON response. The service maps `top_p`, `top_k`, `seed`, and `stop` from Ollama `options` to Vertex generation settings. Temperature and output length use the fixed profile described below.
 
 The bridge routes any requested Ollama model name to `VERTEX_MODEL_ID`, while echoing the requested name in the response. Model installation and deletion endpoints are intentionally unsupported.
 
@@ -31,7 +31,7 @@ For a long-running service, authenticate the Linux account used by systemd. Appl
 ## Run directly
 
 ```bash
-chmod +x ollama_vertex_bridge.py
+chmod +x ollama_vertex_bridge_basic_auth.py
 
 export VERTEX_PROJECT_ID="d4science-ai-services-prod"
 export VERTEX_LOCATION="global"
@@ -39,7 +39,7 @@ export VERTEX_API_ENDPOINT="aiplatform.googleapis.com"
 export VERTEX_MODEL_ID="gemini-3.5-flash"
 export OLLAMA_MODEL_NAME="gemini-3.5-flash"
 
-./ollama_vertex_bridge.py --host 0.0.0.0 --port 11435
+./ollama_vertex_bridge_basic_auth.py --host 0.0.0.0 --port 11435
 ```
 
 ## Test
@@ -54,9 +54,9 @@ curl http://127.0.0.1:11435/api/generate \
     "prompt": "What is the capital of France?",
     "stream": false,
     "options": {
-      "temperature": 0.5,
+      "temperature": 0,
       "top_p": 0.95,
-      "num_predict": 2024
+      "num_predict": 1536
     }
   }'
 ```
@@ -98,8 +98,8 @@ export OLLAMA_HOST=http://127.0.0.1:11435
 
 ```bash
 sudo mkdir -p /opt/ollama-vertex-bridge
-sudo cp ollama_vertex_bridge.py /opt/ollama-vertex-bridge/
-sudo chmod 755 /opt/ollama-vertex-bridge/ollama_vertex_bridge.py
+sudo cp ollama_vertex_bridge_basic_auth.py /opt/ollama-vertex-bridge/
+sudo chmod 755 /opt/ollama-vertex-bridge/ollama_vertex_bridge_basic_auth.py
 
 sudo cp ollama-vertex-bridge.env /etc/default/ollama-vertex-bridge
 sudo cp ollama-vertex-bridge.service /etc/systemd/system/
@@ -123,3 +123,39 @@ This provides wire compatibility for the main text/chat use case, not every Olla
 - Model management operations such as pull/create/delete return HTTP 501.
 - Vertex's REST streaming endpoint returns a JSON array to `curl`; this bridge parses that response and then emits Ollama NDJSON chunks. The response format is streaming-compatible, but the first Ollama chunk may arrive only after Vertex has completed the upstream request.
 - Ollama's opaque `context` token array has no Vertex equivalent, so `/api/generate` returns an empty `context`. Clients should resend prior conversation through `/api/chat` messages.
+
+## Fixed Gemini generation profile
+
+The supplied environment file and Python defaults use:
+
+- `LOCAL_CONTEXT_WINDOW=4096`: bridge-enforced input plus reserved output budget.
+- `DEFAULT_TEMPERATURE=0`: forwarded as Vertex `temperature`.
+- `DEFAULT_MAX_OUTPUT_TOKENS=1536`: forwarded as Vertex `maxOutputTokens`.
+
+Both `/api/chat` and `/api/generate` enforce this profile. Client `temperature`,
+`num_predict`, and `num_ctx` options do not override it. Other supported options
+retain their existing mapping; `top_p` defaults to 0.95 as before.
+Administrators can change the profile through these environment variables.
+
+Vertex does not implement Ollama's `num_ctx`. Before generation the bridge calls
+Vertex `countTokens` for the converted input, including system instructions.
+Input tokens plus the reserved 1536 output tokens must not exceed 4096. Thus the
+default input allowance is 2560 tokens. Oversized requests receive HTTP 400;
+no text, evidence, or conversation messages are silently truncated. Token-count
+errors fail the request rather than bypassing the budget. This is a local request
+budget, not a restriction of Gemini's native context capacity or an exact replica
+of Ollama context handling. The extra API call adds latency and requires countTokens
+access for the deployed model. Gemini/provider reasoning and token accounting can
+also affect the amount of visible answer text within the output limit.
+
+After replacing an installed script and environment file, restart the service:
+
+```bash
+sudo systemctl restart ollama-vertex-bridge
+```
+
+The existing unit may refer to `ollama_vertex_bridge.py`; either install the updated
+script at that existing path or update `ExecStart` to the supplied filename and run
+`sudo systemctl daemon-reload` before restarting. Authentication settings are unchanged.
+
+Tests: `python3 -m unittest discover -s tests -v` (mocked, no cloud calls).

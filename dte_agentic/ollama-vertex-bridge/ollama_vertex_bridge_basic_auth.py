@@ -55,8 +55,11 @@ class Config:
         self.host = os.getenv("BRIDGE_HOST", "0.0.0.0")
         self.port = env_int("BRIDGE_PORT", 11435)
         self.timeout = env_int("VERTEX_TIMEOUT_SECONDS", 600)
-        self.default_max_tokens = env_int("DEFAULT_MAX_OUTPUT_TOKENS", 2024)
-        self.default_temperature = env_float("DEFAULT_TEMPERATURE", 0.5)
+        self.default_max_tokens = env_int("DEFAULT_MAX_OUTPUT_TOKENS", 1536)
+        self.default_temperature = env_float("DEFAULT_TEMPERATURE", 0.0)
+        self.local_context_window = env_int("LOCAL_CONTEXT_WINDOW", 4096)
+        if not 0 < self.default_max_tokens < self.local_context_window:
+            raise RuntimeError("Output limit must be positive and smaller than LOCAL_CONTEXT_WINDOW")
         self.default_top_p = env_float("DEFAULT_TOP_P", 0.95)
         self.use_vertex_stream_endpoint = os.getenv("USE_VERTEX_STREAM_ENDPOINT", "true").lower() in {
             "1", "true", "yes", "on"
@@ -114,7 +117,7 @@ def get_access_token() -> str:
     return token
 
 
-def run_vertex_request(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], int]:
+def run_vertex_request(payload: dict[str, Any], *, url: str | None = None) -> tuple[list[dict[str, Any]], int]:
     """Call Vertex through curl and return response objects plus duration in ns."""
     token = get_access_token()
     command = [
@@ -130,7 +133,7 @@ def run_vertex_request(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], i
         f"Authorization: Bearer {token}",
         "-H",
         "Content-Type: application/json",
-        CONFIG.vertex_url,
+        url or CONFIG.vertex_url,
         "--data-binary",
         "@-",
     ]
@@ -197,8 +200,8 @@ def ollama_options_to_vertex(body: dict[str, Any]) -> dict[str, Any]:
     options = body.get("options") if isinstance(body.get("options"), dict) else {}
     generation: dict[str, Any] = {
         "candidateCount": 1,
-        "maxOutputTokens": int(options.get("num_predict", CONFIG.default_max_tokens)),
-        "temperature": float(options.get("temperature", CONFIG.default_temperature)),
+        "maxOutputTokens": CONFIG.default_max_tokens,
+        "temperature": CONFIG.default_temperature,
         "topP": float(options.get("top_p", CONFIG.default_top_p)),
     }
 
@@ -218,6 +221,35 @@ def ollama_options_to_vertex(body: dict[str, Any]) -> dict[str, Any]:
         generation["responseSchema"] = fmt
 
     return generation
+
+
+def enforce_context_budget(payload: dict[str, Any]) -> int:
+    """Reject requests exceeding the local input-plus-output budget; never truncate.
+
+    Vertex has no num_ctx field. Count the actual converted contents (including
+    system instructions and images) using its model-specific tokenizer instead.
+    Client num_ctx/num_predict/temperature cannot override the configured profile.
+    This is an application budget, not a change to Gemini's native context window.
+    """
+    count_payload = {"contents": payload["contents"]}
+    if "systemInstruction" in payload:
+        count_payload["systemInstruction"] = payload["systemInstruction"]
+    count_url = CONFIG.vertex_url.rsplit(":", 1)[0] + ":countTokens"
+    responses, _ = run_vertex_request(count_payload, url=count_url)
+    count = responses[0].get("totalTokens") if responses else None
+    if type(count) is not int or count < 0:
+        raise BridgeError("Vertex countTokens returned no valid totalTokens", 502)
+    reserved = payload["generationConfig"]["maxOutputTokens"]
+    if count + reserved > CONFIG.local_context_window:
+        raise BridgeError(
+            f"Local context budget exceeded: {count} input tokens + "
+            f"{reserved} reserved output tokens > {CONFIG.local_context_window}. "
+            "Reduce the supplied context; no input was truncated.",
+            400,
+        )
+    LOG.info("Context budget: input=%d reserved_output=%d local_limit=%d",
+             count, reserved, CONFIG.local_context_window)
+    return count
 
 
 def images_to_parts(images: Any) -> list[dict[str, Any]]:
@@ -484,6 +516,7 @@ class Handler(BaseHTTPRequestHandler):
     def handle_generation(self, body: dict[str, Any], chat: bool) -> None:
         requested_model = normalize_model(body.get("model"))
         vertex_payload = chat_to_vertex(body) if chat else generate_to_vertex(body)
+        enforce_context_budget(vertex_payload)
         responses, total_duration = run_vertex_request(vertex_payload)
         vertex_chunks, finish_reason, usage = extract_vertex_result(responses)
         text = "".join(vertex_chunks)
@@ -573,6 +606,7 @@ class Handler(BaseHTTPRequestHandler):
                 f"temperature {CONFIG.default_temperature}\n"
                 f"top_p {CONFIG.default_top_p}\n"
                 f"num_predict {CONFIG.default_max_tokens}\n"
+                f"num_ctx {CONFIG.local_context_window}\n"
             ),
             "template": "{{ .Prompt }}",
             "details": {
@@ -586,6 +620,8 @@ class Handler(BaseHTTPRequestHandler):
             "model_info": {
                 "general.architecture": "gemini",
                 "general.name": CONFIG.vertex_model,
+                "bridge.local_context_window": CONFIG.local_context_window,
+                "bridge.context_policy": "countTokens input plus reserved output; reject overflow",
             },
             "capabilities": ["completion", "vision"],
         }
