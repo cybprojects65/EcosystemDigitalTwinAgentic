@@ -52,7 +52,7 @@ Open [http://localhost:5000](http://localhost:5000).
 
 For an NVIDIA-enabled Docker installation, add `--gpus all` to `docker run`. Without that option, local inference can run on the CPU.
 
-At startup, the container starts Ollama, pulls `llama3.2:3b` and `nomic-embed-text`, and launches the application. Initial indexing may take substantial time because the CSV records and all PDF pages must be embedded before Flask starts accepting requests. Subsequent starts reuse a completed index for the same corpus and chunk settings.
+At startup, the container starts Ollama, pulls `llama3.2:3b` and `nomic-embed-text`, and launches the application. Initial indexing may take substantial time because all PDF passages must be embedded before Flask starts accepting requests. Subsequent starts reuse a completed index for the same corpus and chunk settings.
 
 The named volumes preserve downloaded models and Chroma data when the container is replaced. To restart the existing container:
 
@@ -133,27 +133,35 @@ Here `bridge-host` must be reachable from inside the container. `localhost` refe
 
 ## Data and indexing
 
-The application reads `.pdf` and `.csv` files from `dockerproject/data/`. The supplied collection has twelve PDFs and one CSV containing coordinates, ecosystem stressors, and previously calculated risk classifications.
+The application reads `.pdf` and `.csv` files from `dte_agentic/data/`. The supplied collection has twelve PDFs and one CSV containing coordinates, ecosystem stressors, and previously calculated risk classifications.
 
-PDF pages and CSV records are loaded as documents and split into chunks of up to **1,200 characters**, with **200-character overlap**. Each chunk receives a Nomic embedding and is stored in Chroma. CSV records are indexed as text, not exposed as a computational table-analysis tool.
+PDF text is split into chunks of up to **1,200 characters**, with no overlap. Each PDF chunk receives a Nomic embedding and is stored in Chroma.
 
-A content fingerprint includes source filenames and bytes, chunk size, overlap, and embedding model name. Changed files or chunk settings select a new collection. An index-completion marker prevents reuse of interrupted ingestion. Existing older collections are retained. If the underlying embedding model changes while retaining the same name, the fingerprint does not detect that change; regenerate the index in that case.
+**Every CSV is loaded in full at startup and included in every answer prompt.** CSV headers, descriptions, row order, quoted fields, and all data rows are preserved (a UTF-8 BOM is removed). CSVs are never chunked, embedded, sampled, or filtered by retrieval scores. Restart the app after changing the data files. These files are supplied as text, not as a computational table-analysis tool.
 
-At startup, indexed embeddings are loaded into memory for exact cosine comparisons. Memory use therefore grows with the corpus.
+The PDF index fingerprint includes PDF filenames and bytes, chunk settings, and embedding model name. A new index namespace prevents reuse of previous collections containing CSV chunks. The first start after this update rebuilds the PDF index automatically; older collections are retained. CSV changes require a restart but do not trigger PDF reindexing.
 
 ## Request processing
 
 1. Receive the current message; previous conversation turns are not included.
 2. Compare its embedding against ten fixed expressions about recent observations.
-3. If the highest cosine similarity is **strictly greater than 0.50**, fetch the remote observation table and append all rows, including headers, as CSV.
-4. Embed the resulting input and calculate cosine similarity against every indexed chunk.
-5. Select **all chunks with similarity at least 0.60**, ordered by decreasing similarity.
-6. Supply the input, selected chunks, and fixed behavioural instructions to the LLM.
+3. If the highest cosine similarity is strictly greater than `LIVE_QUERY_SIMILARITY_THRESHOLD` (default **0.6**), fetch the remote observation table and append all rows, including headers, to the current input.
+4. Search the PDF index using the original question, with up to `RAG_TOP_K` candidates (default **8**).
+5. Retain PDF chunks with squared-L2 distance at most `RAG_MAX_DISTANCE` (default **0.6**), deduplicate, and order by increasing distance.
+6. Supply the selected PDF chunks, **every complete local CSV**, the current input, and fixed behavioural instructions to the LLM. Source filenames label each evidence item.
 7. Return the generated answer.
 
-Retrieval is threshold-based cosine selection, **not maximum marginal relevance (MMR)**. There is no fixed `k` and no candidate-count cutoff. When nothing qualifies, the retrieved context is empty; no below-threshold fallback is injected. The model still receives the current input and fixed instructions.
+When no PDF chunks qualify, the full CSV evidence is still supplied. PDF retrieval thresholds and candidate limits never limit CSV inclusion.
 
-All qualifying chunks are passed to generation. The application does not limit their combined size, so the inference service must have sufficient context capacity. A backend's context limits may affect processing of large result sets.
+### Context capacity
+
+Configure `NUM_CTX` and an inference model/backend with sufficient capacity; a larger setting cannot increase the model's supported maximum. The required token count depends on its tokenizer. No automatic CSV truncation or summarisation is performed by the app; a backend may reject or truncate an oversized prompt. This change guarantees full CSV inclusion in the submitted prompt, while complete model processing depends on backend capacity.
+
+Run offline regression checks from `dte_agentic/` with:
+
+```bash
+python -m unittest discover -s tests -v
+```
 
 The browser can display earlier messages, but they are not model context. Follow-up requests should repeat any information needed to interpret them independently.
 
@@ -185,7 +193,7 @@ Invalid or empty input returns HTTP 400. Processing failures return HTTP 500 and
 
 The baseline interprets retrieved environmental evidence and previously generated model outputs. It does not run MaxEnt, calculate dataset-wide correlations, retrain risk models, or execute Random Forest scenario projections. Requests asking for those analyses do not create new numerical evidence through executable scientific tools.
 
-For reproducible experiments, retain the exact source revision, input files, remote-table snapshot, model identifiers and versions, generation settings, dependency versions, and query set. The Dockerfile downloads current packages and model tags rather than pinning immutable versions. Generation parameters and context limits are not explicitly set by `app.py`; backend defaults apply.
+For reproducible experiments, retain the exact source revision, input files, remote-table snapshot, model identifiers and versions, generation settings, dependency versions, and query set. The Dockerfile downloads current packages and model tags rather than pinning immutable versions. Generation parameters and context limits are configured in `app.py` through environment variables, including `NUM_CTX`, `NUM_PREDICT`, `TEMPERATURE`, `TOP_P`, and `SEED`.
 
 The current revision changes the earlier baseline's history handling, chunk size, retrieval policy, and live-row inclusion. Published benchmark scores should describe the configuration actually evaluated; rerun the benchmark if assigning results to this revised configuration.
 

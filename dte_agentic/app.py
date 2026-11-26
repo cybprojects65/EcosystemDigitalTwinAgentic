@@ -10,7 +10,6 @@ import sys
 sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
 
 import hashlib
-import csv
 import re
 import logging
 import os
@@ -41,7 +40,7 @@ CHUNK_SIZE = 1200
 CHUNK_OVERLAP = 0
 TOP_K = int(os.getenv("RAG_TOP_K", "8"))
 RAG_MAX_DISTANCE = float(os.getenv("RAG_MAX_DISTANCE", "0.6"))
-NUM_CTX = int(os.getenv("NUM_CTX", "16384"))
+NUM_CTX = int(os.getenv("NUM_CTX", "131072"))
 NUM_PREDICT = int(os.getenv("NUM_PREDICT", "2500"))
 TEMPERATURE = float(os.getenv("TEMPERATURE", "0"))
 TOP_P = float(os.getenv("TOP_P", "1"))
@@ -60,16 +59,36 @@ app.logger.info(
 )
 embeddings = OllamaEmbeddings(model=EMBEDDING_MODEL, base_url=EMBEDDING_BASE_URL)
 
-# Identify the corpus and chunking settings so older cached indexes cannot
-# silently omit new papers or reuse the previous 1,000-character chunks.
+# Keep PDF retrieval separate from full CSV evidence. A new index namespace
+# prevents reuse of older collections containing CSV row chunks.
 DATA_PATH = Path(__file__).resolve().parent / "data"
 files = sorted(p for p in DATA_PATH.iterdir() if p.suffix.lower() in {".pdf", ".csv"})
 if not files:
     raise RuntimeError("No PDF or CSV files found in data/")
 print(f"Corpus: {sum(p.suffix.lower() == '.pdf' for p in files)} PDFs, "
       f"{sum(p.suffix.lower() == '.csv' for p in files)} CSVs")
-fingerprint = hashlib.sha256(f"java-aligned-v1:pypdf:{CHUNK_SIZE}:{CHUNK_OVERLAP}:{EMBEDDING_MODEL}:l2".encode())
-for path in files:
+pdf_files = [path for path in files if path.suffix.lower() == ".pdf"]
+csv_files = [path for path in files if path.suffix.lower() == ".csv"]
+
+
+def load_csv_documents(paths):
+    """Load each complete CSV verbatim, including headers and description rows."""
+    documents = []
+    for path in paths:
+        with path.open(encoding="utf-8-sig", newline="") as stream:
+            text = stream.read()
+        documents.append(Document(page_content=text, metadata={
+            "source": str(path), "evidence_type": "complete_csv",
+        }))
+        app.logger.info("Full CSV evidence: %s (%d characters)", path.name, len(text))
+    return documents
+
+
+# Load once at startup, like the PDF corpus. Restart after changing data files.
+# No splitting, sampling, distance filtering, or row limits apply to CSVs.
+csv_documents = load_csv_documents(csv_files)
+fingerprint = hashlib.sha256(f"pdf-only-full-csv-v2:pypdf:{CHUNK_SIZE}:{CHUNK_OVERLAP}:{EMBEDDING_MODEL}:l2".encode())
+for path in pdf_files:
     app.logger.info("Corpus file: %s", path.name)
     fingerprint.update(path.name.encode())
     with path.open("rb") as stream:
@@ -88,45 +107,32 @@ def normalize_text(text):
 
 
 def load_chunks(path):
-    """Fixed full-document chunks for PDFs; textual records for CSV evidence."""
-    if path.suffix.lower() == ".pdf":
-        pages = [normalize_text(page.extract_text() or "") for page in PdfReader(str(path)).pages]
-        spans = []
-        parts = []
-        offset = 0
-        for page_index, text in enumerate(pages):
-            if text:
-                if parts:
-                    offset += 1  # separator between nonempty pages
-                spans.append((offset, offset + len(text), page_index))
-                parts.append(text)
-                offset += len(text)
-        text = " ".join(parts)
-        documents = []
-        for chunk_index, start in enumerate(range(0, len(text), CHUNK_SIZE)):
-            end = min(start + CHUNK_SIZE, len(text))
-            chunk = text[start:end]
-            if not chunk.strip():
-                continue
-            touched = [page for a, b, page in spans if a < end and b > start]
-            metadata = {"source": str(path), "chunk": chunk_index}
-            if touched:
-                metadata.update(page=touched[0], page_end=touched[-1])
-            documents.append(Document(page_content=chunk, metadata=metadata))
-        return documents
+    """Fixed full-document chunks for PDF retrieval only."""
+    if path.suffix.lower() != ".pdf":
+        raise ValueError("Only PDFs may be chunked for retrieval")
+    pages = [normalize_text(page.extract_text() or "") for page in PdfReader(str(path)).pages]
+    spans = []
+    parts = []
+    offset = 0
+    for page_index, text in enumerate(pages):
+        if text:
+            if parts:
+                offset += 1  # separator between nonempty pages
+            spans.append((offset, offset + len(text), page_index))
+            parts.append(text)
+            offset += len(text)
+    text = " ".join(parts)
     documents = []
-    with path.open(newline="", encoding="utf-8-sig") as stream:
-        for row_index, row in enumerate(csv.DictReader(stream)):
-            text = normalize_text("\n".join(
-                f"{key}: {value.strip() if isinstance(value, str) else value}"
-                for key, value in row.items()
-            ))
-            for chunk_index, start in enumerate(range(0, len(text), CHUNK_SIZE)):
-                chunk = text[start:start + CHUNK_SIZE]
-                if chunk.strip():
-                    documents.append(Document(page_content=chunk, metadata={
-                        "source": str(path), "row": row_index, "chunk": chunk_index,
-                    }))
+    for chunk_index, start in enumerate(range(0, len(text), CHUNK_SIZE)):
+        end = min(start + CHUNK_SIZE, len(text))
+        chunk = text[start:end]
+        if not chunk.strip():
+            continue
+        touched = [page for a, b, page in spans if a < end and b > start]
+        metadata = {"source": str(path), "chunk": chunk_index}
+        if touched:
+            metadata.update(page=touched[0], page_end=touched[-1])
+        documents.append(Document(page_content=chunk, metadata=metadata))
     return documents
 
 
@@ -135,7 +141,7 @@ def load_chunks(path):
 marker = DATA_PATH.parent / "chroma_db" / (collection_name + ".complete")
 if not marker.exists():
     vectorstore.reset_collection()
-    for path in files:
+    for path in pdf_files:
         chunks = load_chunks(path)
         for offset in range(0, len(chunks), 128):
             vectorstore.add_documents(chunks[offset:offset + 128])
@@ -164,7 +170,7 @@ def retrieve_documents(inputs):
         pdf_count, len(documents) - pdf_count,
     )
     if not documents:
-        app.logger.warning("No chunks meet the Chroma distance cutoff; retrieved context is empty.")
+        app.logger.warning("No chunks meet the Chroma distance cutoff; PDF context is empty; complete CSV evidence is still included.")
     elif not pdf_count:
         app.logger.warning("No PDF passages retrieved for this request.")
     for rank, doc in enumerate(documents, start=1):
@@ -179,7 +185,9 @@ def retrieve_documents(inputs):
             doc.metadata.get("chunk", "N/A"), doc.metadata["chroma_distance"],
             doc.page_content[:300].replace("\n", " ").replace("\r", " "),
         )
-    return documents
+    app.logger.info("Including %d complete CSV files alongside %d PDF chunks",
+                    len(csv_documents), len(documents))
+    return documents + csv_documents
 
 
 retriever = RunnableLambda(retrieve_documents)
@@ -202,7 +210,8 @@ system_instructions = (
     "general ecosystem issues, status, and critical transitions.\n\n"
     
     "CONTEXT 4: KNOWLEDGE BASE RULES\n"
-    "Analyse the CSV from the KB whenever data is needed. "
+    "The context includes retrieved PDF passages and the complete local CSV files. "
+    "Analyse the complete CSV from the KB whenever data is needed; use all relevant rows. "
     "NEVER ask for confirmation; never say 'I'm sorry'.\n\n"
     
     "CONTEXT 5: REFERENCE TO KNOWLEDGE BASE AND DATA\n"
@@ -216,7 +225,10 @@ system_instructions = (
 )
 
 prompt = PromptTemplate.from_template(system_instructions + "\n\nUSER QUERY:\n{input}")
-combine_docs_chain = create_stuff_documents_chain(llm, prompt)
+# Label sources without formatting or truncating their contents. Both PDF chunks
+# and complete CSVs have source metadata.
+document_prompt = PromptTemplate.from_template("SOURCE: {source}\n{page_content}")
+combine_docs_chain = create_stuff_documents_chain(llm, prompt, document_prompt=document_prompt)
 rag_chain = create_retrieval_chain(retriever, combine_docs_chain)
 
 @app.route('/')
