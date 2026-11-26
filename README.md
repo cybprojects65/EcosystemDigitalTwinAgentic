@@ -46,7 +46,18 @@ docker run --name massaciuccoli-baseline \
   -v massaciuccoli_ollama:/root/.ollama \
   -v massaciuccoli_chroma:/app/chroma_db \
   massaciuccoli-baseline
+ 
 ```
+Or, in the case GPU is available, 
+
+```bash
+cd dte_agentic
+docker build -t massaciuccoli-baseline .
+docker run --gpus all -p 5000:5000 -p 11434:11434 -v ollama_models:/root/.ollama -v chroma_db_data:/app/chroma_db massaciuccoli-baseline
+
+```
+
+
 
 Open [http://localhost:5000](http://localhost:5000).
 
