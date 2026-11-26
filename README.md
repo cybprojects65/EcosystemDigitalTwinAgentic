@@ -22,11 +22,11 @@ Coro, G. and Bove, B. 2026. Building Conversational Digital Twins of Natural Eco
 
 | Path | Purpose |
 | --- | --- |
-| `dockerproject/app.py` | Indexing, retrieval, prompts, live observations, and Flask routes |
-| `dockerproject/data/` | Twelve scientific PDFs and the ecosystem CSV |
-| `dockerproject/templates/index.html` | Browser interface |
-| `dockerproject/Dockerfile` | Container image and Python dependencies |
-| `dockerproject/start.sh` | Starts local Ollama, downloads models, and launches Flask |
+| `dte_agentic/app.py` | Indexing, retrieval, prompts, live observations, and Flask routes |
+| `dte_agentic/data/` | Twelve scientific PDFs and the ecosystem CSV |
+| `dte_agentic/templates/index.html` | Browser interface |
+| `dte_agentic/Dockerfile` | Container image and Python dependencies |
+| `dte_agentic/start.sh` | Starts local Ollama, downloads models, and launches Flask |
 | `run_langchain_chroma.txt` | Earlier Docker command examples |
 | `README_revision.md` | Changes and validation notes for the revised baseline |
 
@@ -39,7 +39,7 @@ Prerequisites: Docker Engine or Docker Desktop, internet access for installation
 From this project's root directory:
 
 ```bash
-cd dockerproject
+cd dte_agentic
 docker build -t massaciuccoli-baseline .
 docker run --name massaciuccoli-baseline \
   -p 127.0.0.1:5000:5000 \
@@ -64,9 +64,9 @@ Flask's built-in server is intended for local experimentation; production deploy
 
 ## Running directly with Python
 
-Use a Python environment compatible with the dependencies listed in `dockerproject/Dockerfile`. The container uses Ubuntu 22.04 and its system Python; package versions are not pinned.
+Use a Python environment compatible with the dependencies listed in `dte_agentic/Dockerfile`. The container uses Ubuntu 22.04 and its system Python; package versions are not pinned.
 
-From `dockerproject/`, create and activate a virtual environment, then install:
+From `dte_agentic/`, create and activate a virtual environment, then install:
 
 ```bash
 python3 -m venv .venv
