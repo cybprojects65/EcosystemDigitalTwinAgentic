@@ -44,7 +44,7 @@ RUN pip3 install --no-cache-dir \
 	
 COPY . .
 
-RUN chmod +x start.sh
+RUN sed -i 's/\r$//' /app/start.sh && chmod +x /app/start.sh
 
 # Create the data and DB folders so they have the right permissions
 RUN mkdir -p /app/data /app/chroma_db
